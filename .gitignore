@@ -1,0 +1,17 @@
+.streamlit/secrets.toml
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.env
+venv/
+.venv/
+
+.DS_Store
+Thumbs.db
+
+.vscode/
+.idea/
