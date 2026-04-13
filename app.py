@@ -7,24 +7,37 @@ import streamlit.components.v1 as components
 
 st.set_page_config(
     page_title="F1 Race Replay",
-    page_icon="🏎️",
     layout="wide"
 )
 
-credentials = service_account.Credentials.from_service_account_info(
-    st.secrets["gcp_service_account"],
-    scopes=["https://www.googleapis.com/auth/bigquery"]
-)
-client = bigquery.Client(credentials=credentials, project="openf1-pipeline")
+
+@st.cache_resource
+def get_bq_client():
+    credentials = service_account.Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=["https://www.googleapis.com/auth/bigquery"]
+    )
+    return bigquery.Client(credentials=credentials, project="openf1-pipeline")
+
 
 @st.cache_data(ttl=3600)
 def get_meetings():
     query = """
-        SELECT DISTINCT meeting_key, meeting_name, country_name, year
-        FROM `openf1-pipeline.raw.meetings`
-        ORDER BY year DESC, meeting_key DESC
+        SELECT DISTINCT
+            m.meeting_key,
+            m.meeting_name,
+            m.country_name,
+            m.year
+        FROM `openf1-pipeline.raw.meetings` m
+        WHERE EXISTS (
+            SELECT 1
+            FROM `openf1-pipeline.marts.fct_race_replay` r
+            WHERE r.meeting_key = m.meeting_key
+        )
+        ORDER BY m.year DESC, m.meeting_key DESC
     """
-    return client.query(query).to_dataframe()
+    return get_bq_client().query(query).to_dataframe()
+
 
 @st.cache_data(ttl=3600)
 def get_track_outline(meeting_key):
@@ -44,7 +57,8 @@ def get_track_outline(meeting_key):
         WHERE MOD(rn, 3) = 0
         ORDER BY rn
     """
-    return client.query(query).to_dataframe()
+    return get_bq_client().query(query).to_dataframe()
+
 
 @st.cache_data(ttl=3600)
 def get_race_data(meeting_key):
@@ -62,7 +76,8 @@ def get_race_data(meeting_key):
         WHERE MOD(rn, 5) = 0
         ORDER BY driver_number, ts
     """
-    return client.query(query).to_dataframe()
+    return get_bq_client().query(query).to_dataframe()
+
 
 @st.cache_data(ttl=3600)
 def get_laps_data(meeting_key):
@@ -76,7 +91,8 @@ def get_laps_data(meeting_key):
         AND date_start IS NOT NULL
         ORDER BY driver_number, lap_number
     """
-    return client.query(query).to_dataframe()
+    return get_bq_client().query(query).to_dataframe()
+
 
 @st.cache_data(ttl=3600)
 def get_starting_grid(meeting_key):
@@ -86,7 +102,8 @@ def get_starting_grid(meeting_key):
         WHERE meeting_key = {meeting_key}
         ORDER BY position
     """
-    return client.query(query).to_dataframe()
+    return get_bq_client().query(query).to_dataframe()
+
 
 @st.cache_data(ttl=3600)
 def get_car_data(meeting_key):
@@ -96,7 +113,7 @@ def get_car_data(meeting_key):
                 UNIX_MILLIS(TIMESTAMP(date)) as ts,
                 driver_number, rpm, speed, n_gear, throttle, brake, drs,
                 ROW_NUMBER() OVER (PARTITION BY driver_number ORDER BY date) as rn
-            FROM `openf1-pipeline.raw.car_data`
+            FROM `openf1-pipeline.marts.fct_car_telemetry`
             WHERE meeting_key = {meeting_key}
         )
         SELECT ts, driver_number, rpm, speed, n_gear, throttle, brake, drs
@@ -104,7 +121,8 @@ def get_car_data(meeting_key):
         WHERE MOD(rn, 10) = 0
         ORDER BY driver_number, ts
     """
-    return client.query(query).to_dataframe()
+    return get_bq_client().query(query).to_dataframe()
+
 
 def format_color(team_colour):
     if not team_colour or str(team_colour) == 'nan':
@@ -112,8 +130,10 @@ def format_color(team_colour):
     c = str(team_colour).strip()
     return f"#{c}" if not c.startswith('#') else c
 
-# --- Sidebar ---
-st.sidebar.title("🏎️ F1 Race Replay")
+
+# Sidebar
+
+st.sidebar.title("F1 Race Replay")
 
 meetings_df = get_meetings()
 if meetings_df.empty:
@@ -128,12 +148,12 @@ meeting_options = {
 selected_meeting_label = st.sidebar.selectbox("Select Race", list(meeting_options.keys()))
 selected_meeting_key = meeting_options[selected_meeting_label]
 
-if st.sidebar.button("▶ Load Race"):
+if st.sidebar.button("Load Race"):
     st.session_state['loaded'] = True
     st.session_state['meeting_key'] = selected_meeting_key
 
 if 'loaded' not in st.session_state:
-    st.title("🏎️ F1 Race Replay")
+    st.title("F1 Race Replay")
     st.info("Select a race from the sidebar and click Load Race to begin.")
     st.stop()
 
@@ -150,7 +170,8 @@ if location_df.empty:
     st.error("No location data available for this race.")
     st.stop()
 
-# --- Prepare data for JS ---
+# Prepare data for JS
+
 drivers_info = {}
 driver_positions = {}
 
@@ -222,7 +243,7 @@ laps_json = json.dumps(driver_laps)
 car_json = json.dumps(driver_car)
 grid_json = json.dumps(grid_positions)
 
-st.subheader(f"🏁 {selected_meeting_label}")
+st.subheader(selected_meeting_label)
 
 html = f"""
 <style>
@@ -301,7 +322,7 @@ html = f"""
         </div>
     </div>
     <div id="right">
-        <div class="section-title">&#127942; Standings</div>
+        <div class="section-title">Standings</div>
         <div id="standings-list"></div>
         <div id="telemetry-panel">
             <div class="tel-title" id="tel-name">Select a driver</div>
@@ -344,7 +365,6 @@ html = f"""
     const driverNums = Object.keys(driversInfo).map(Number);
     const standingsList = document.getElementById('standings-list');
 
-    // Build standings rows ONCE
     driverNums.forEach(driverNum => {{
         const info = driversInfo[driverNum];
         const row = document.createElement('div');
@@ -441,7 +461,6 @@ html = f"""
             return lapStartMap[a] - lapStartMap[b];
         }});
 
-        // Reorder DOM every 5 seconds of race time
         if (ts - lastReorderTs > 5000) {{
             lastReorderTs = ts;
             sorted.forEach(driverNum => {{
